@@ -1,5 +1,6 @@
 #define _BSD_SOURCE
 
+#include <inttypes.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -17,6 +18,7 @@
 #include <pwd.h>
 
 #include "time.h"
+#include "transform.h"
 
 #include "net.h"
 
@@ -216,6 +218,7 @@ link_create(struct inet_diag_msg *diag_msg) {
         strcat(buf, link->remote_addr_buf);
         strcat(buf, "/sbytes");
         history_create(&link->send, buf);
+        link->send->transform = transform_identity;
 
         buf[0] = 0;
         strcat(buf, "proc/net/");
@@ -224,6 +227,7 @@ link_create(struct inet_diag_msg *diag_msg) {
         strcat(buf, link->remote_addr_buf);
         strcat(buf, "/rbytes");
         history_create(&link->recv, buf);
+        link->recv->transform = transform_identity;
 
     } else {
         /* We do not handle ipv6 nor other protocols */
@@ -253,12 +257,52 @@ link_find_or_create(link_snapshot **links, struct inet_diag_msg *diag_msg) {
     return cur;
 }
 
+static uint32_t
+socket_get_inode(struct inet_diag_msg *msg) {
+    return msg->idiag_inode;
+}
+
+static socket_stat *
+socket_create(socket_stat **socks, struct inet_diag_msg *diag_msg) {
+    socket_stat *sock = (socket_stat *)malloc(sizeof(socket_stat));
+
+    sock->bytes_received = 0;
+    sock->bytes_acked = 0;
+    sock->inode = socket_get_inode(diag_msg);
+
+    sock->next = *socks;
+    *socks = sock;
+
+    return sock;
+}
+
+static void
+socket_delete(socket_stat *socks) {
+    free(socks);
+}
+
+static socket_stat *
+socket_find_or_create(socket_stat **socks, struct inet_diag_msg *diag_msg) {
+    socket_stat *sock = *socks;
+    uint32_t inode = socket_get_inode(diag_msg);
+
+    while (sock) {
+        if (sock->inode == inode) {
+            return sock;
+        }
+        sock = sock->next;
+    }
+
+    return socket_create(socks, diag_msg);
+}
+
 static void
 parse_diag_msg(struct inet_diag_msg *diag_msg, int rtalen, links_snapshot *links){
     struct rtattr *attr;
     struct tcp_info *tcpi;
 
     link_snapshot *link = link_find_or_create(&links->links, diag_msg);
+    socket_stat *sock = socket_find_or_create(&links->sockets, diag_msg);
 
     //Parse the attributes of the netlink message in search of the
     //INET_DIAG_INFO-attribute
@@ -270,9 +314,22 @@ parse_diag_msg(struct inet_diag_msg *diag_msg, int rtalen, links_snapshot *links
                 //The payload of this attribute is a tcp_info-struct, so it is
                 //ok to cast
                 tcpi = (struct tcp_info*) RTA_DATA(attr);
-                link->recv_acc += tcpi->tcpi_rtt;
-                link->send_acc += tcpi->tcpi_rttvar;
+
+                if (sock->is_new) {
+                    sock->is_new = false;
+                }
+
+                if (links->sync) {
+                    sock->bytes_received = tcpi->tcpi_bytes_received;
+                    sock->bytes_acked = tcpi->tcpi_bytes_acked;
+                }
+
+                link->recv_acc += (tcpi->tcpi_bytes_received - sock->bytes_received);
+                link->send_acc += (tcpi->tcpi_bytes_acked - sock->bytes_acked);
                 link->time = links->time;
+
+                sock->bytes_received = tcpi->tcpi_bytes_received;
+                sock->bytes_acked = tcpi->tcpi_bytes_acked;
 
                 //Output some sample data
                 /*
@@ -347,16 +404,25 @@ void links_snapshot_create(links_snapshot **links) {
     *links = (links_snapshot*)(malloc(sizeof(links_snapshot)));
     (*links)->links = 0;
     (*links)->time = 0;
+    (*links)->sockets = 0;
 }
 
 void links_snapshot_delete(links_snapshot *links) {
     link_snapshot *link = links->links;
     link_snapshot *tmp = link;
+    socket_stat *sock = links->sockets;
+    socket_stat *socktmp = links->sockets;
 
     while (link) {
         tmp = link->next;
         link_delete(link);
         link = tmp;
+    }
+
+    while (sock) {
+        socktmp = sock->next;
+        socket_delete(sock);
+        sock = socktmp;
     }
 
     free(links);
@@ -386,4 +452,7 @@ void links_snapshot_tick(links_snapshot *links) {
     links_reset(links);
     links_stat(links);
     links_persist(links);
+
+    if (links->sync)
+        links->sync = false;
 }

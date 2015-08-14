@@ -1,9 +1,22 @@
 #ifndef _NET_H_
 #define _NET_H_
 
+#include <stdbool.h>
 #include <arpa/inet.h>
 
 #include "history.h"
+
+typedef struct
+socket_stat {
+    uint64_t bytes_received;
+    uint64_t bytes_acked;
+
+    uint64_t cookie;
+    uint32_t inode;
+    bool is_new;
+
+    struct socket_stat *next;
+} socket_stat;
 
 typedef struct
 link_snapshot {
@@ -25,6 +38,11 @@ link_snapshot {
 typedef struct
 links_snapshot {
     link_snapshot *links;
+    socket_stat *sockets;
+
+    /* For the first time, we just take snapshots of number of bytes
+     * transfered/received so far */
+    bool sync;
     uint64_t time;
 } links_snapshot;
 
