@@ -1,5 +1,6 @@
 #define _BSD_SOURCE
 
+#include <assert.h>
 #include <inttypes.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -324,12 +325,17 @@ parse_diag_msg(struct inet_diag_msg *diag_msg, int rtalen, links_snapshot *links
                     sock->bytes_acked = tcpi->tcpi_bytes_acked;
                 }
 
+                assert((tcpi->tcpi_bytes_received - sock->bytes_received) >= 0);
+                assert((tcpi->tcpi_bytes_acked - sock->bytes_acked) >= 0);
+
                 link->recv_acc += (tcpi->tcpi_bytes_received - sock->bytes_received);
                 link->send_acc += (tcpi->tcpi_bytes_acked - sock->bytes_acked);
                 link->time = links->time;
 
                 sock->bytes_received = tcpi->tcpi_bytes_received;
                 sock->bytes_acked = tcpi->tcpi_bytes_acked;
+                sock->used = true;
+
 
                 //Output some sample data
                 /*
@@ -445,6 +451,20 @@ void links_persist(links_snapshot *links) {
         history_append(link->recv, link->time, link->recv_acc);
         history_append(link->send, link->time, link->send_acc);
         link = link->next;
+    }
+
+    socket_stat **sock = &links->sockets;
+    socket_stat *tmp = 0;
+
+    while (*sock) {
+        if (!(*sock)->used) {
+            tmp = *sock;
+            *sock = (*sock)->next;
+            socket_delete(tmp);
+            continue;
+        }
+
+        (*sock)->used = false;
     }
 }
 

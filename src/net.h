@@ -14,6 +14,7 @@ socket_stat {
     uint64_t cookie;
     uint32_t inode;
     bool is_new;
+    bool used;
 
     struct socket_stat *next;
 } socket_stat;
