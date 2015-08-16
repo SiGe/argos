@@ -7,6 +7,7 @@ typedef struct
 cpu_snapshot {
     history *cpu;
     history *ctxt;
+    history *iowait;
 } cpu_snapshot;
 
 void cpu_snapshot_create(cpu_snapshot **);

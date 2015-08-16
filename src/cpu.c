@@ -13,17 +13,21 @@ void cpu_snapshot_create(cpu_snapshot **snap) {
 
     history_create(&tmp->cpu, "proc/stat/cpu");
     history_create(&tmp->ctxt, "proc/stat/ctxt");
+    history_create(&tmp->iowait, "proc/stat/iowait");
 
     tmp->cpu->transform = transform_delta;
     tmp->ctxt->transform = transform_delta;
+    tmp->iowait->transform = transform_delta;
 }
 
 void cpu_snapshot_delete(cpu_snapshot *snap) {
     history_save(snap->cpu);
     history_save(snap->ctxt);
+    history_save(snap->iowait);
 
     history_delete(snap->cpu);
     history_delete(snap->ctxt);
+    history_delete(snap->iowait);
 
     free(snap);
 }
@@ -55,6 +59,11 @@ void cpu_snapshot_tick(cpu_snapshot *cpu) {
             t1 += strtoull(buf, 0, 10);
 
             history_append(cpu->cpu, snap->time, t1);
+
+            /* Get the system time */
+            column(data, 5, buf, 32);
+            t1 = strtoull(buf, 0, 10);
+            history_append(cpu->iowait, snap->time, t1);
         }
 
         /* save the number of context switches */

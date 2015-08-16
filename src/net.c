@@ -304,6 +304,7 @@ parse_diag_msg(struct inet_diag_msg *diag_msg, int rtalen, links_snapshot *links
 
     link_snapshot *link = link_find_or_create(&links->links, diag_msg);
     socket_stat *sock = socket_find_or_create(&links->sockets, diag_msg);
+    //assert(sock == socket_find_or_create(&links->sockets, diag_msg));
 
     //Parse the attributes of the netlink message in search of the
     //INET_DIAG_INFO-attribute
@@ -325,17 +326,28 @@ parse_diag_msg(struct inet_diag_msg *diag_msg, int rtalen, links_snapshot *links
                     sock->bytes_acked = tcpi->tcpi_bytes_acked;
                 }
 
-                assert((tcpi->tcpi_bytes_received - sock->bytes_received) >= 0);
-                assert((tcpi->tcpi_bytes_acked - sock->bytes_acked) >= 0);
+                if ((tcpi->tcpi_bytes_received < sock->bytes_received)) {
+                    // Assume that the socket restarted :-(
+                    printf("Maybe the socket reseted? Can't handle this case ...\n");
+                    sock->bytes_received = 0;
+                    sock->bytes_acked = 0;
+                }
+
+                if (tcpi->tcpi_bytes_acked < sock->bytes_acked) {
+                    printf("Did the socket reset? Can't handle this case ...\n");
+                    sock->bytes_acked = 0;
+                    sock->bytes_received = 0;
+                }
 
                 link->recv_acc += (tcpi->tcpi_bytes_received - sock->bytes_received);
                 link->send_acc += (tcpi->tcpi_bytes_acked - sock->bytes_acked);
+
                 link->time = links->time;
 
                 sock->bytes_received = tcpi->tcpi_bytes_received;
                 sock->bytes_acked = tcpi->tcpi_bytes_acked;
-                sock->used = true;
 
+                sock->used = true;
 
                 //Output some sample data
                 /*
@@ -442,6 +454,11 @@ void links_reset(links_snapshot *links) {
         link->recv_acc = 0;
         link = link->next;
     }
+
+    socket_stat *sock = links->sockets;
+    while (sock) {
+        sock = sock->next;
+    }
 }
 
 void links_persist(links_snapshot *links) {
@@ -465,6 +482,7 @@ void links_persist(links_snapshot *links) {
         }
 
         (*sock)->used = false;
+        sock = &(*sock)->next;
     }
 }
 
