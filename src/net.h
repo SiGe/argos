@@ -2,7 +2,9 @@
 #define _NET_H_
 
 #include <stdbool.h>
+
 #include <arpa/inet.h>
+#include <libmnl/libmnl.h>
 
 #include "history.h"
 
@@ -11,8 +13,16 @@ socket_stat {
     uint64_t bytes_received;
     uint64_t bytes_acked;
 
-    uint64_t cookie;
     uint32_t inode;
+
+    uint32_t srcip;
+    uint32_t dstip;
+    uint16_t sport;
+    uint16_t dport;
+
+    uint32_t last_sent;
+    uint32_t last_recv;
+
     bool is_new;
     bool used;
 
@@ -21,7 +31,10 @@ socket_stat {
 
 typedef struct
 link_snapshot {
-    uint64_t tag;
+    uint32_t srcip;
+    uint32_t dstip;
+    uint16_t sport;
+    uint16_t dport;
 
     history *recv;
     history *send;

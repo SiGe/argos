@@ -5,18 +5,17 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <stdint.h>
 #include <unistd.h>
-#include <asm/types.h>
-#include <sys/socket.h>
-#include <linux/netlink.h>
-#include <linux/rtnetlink.h>
-#include <netinet/in.h>
-#include <linux/tcp.h>
-#include <linux/sock_diag.h>
-#include <linux/inet_diag.h>
+#include <time.h>
+
 #include <arpa/inet.h>
-#include <pwd.h>
+
+#include <asm/types.h>
+#include <libmnl/libmnl.h>
+#include <linux/inet_diag.h>
+#include <linux/sock_diag.h>
+#include <linux/tcp.h>
+
 
 #include "time.h"
 #include "transform.h"
@@ -24,18 +23,21 @@
 #include "net.h"
 
 //Kernel TCP states. /include/net/tcp_states.h
-enum{
+enum {
     TCP_ESTABLISHED = 1,
     TCP_SYN_SENT,
     TCP_SYN_RECV,
     TCP_FIN_WAIT1,
     TCP_FIN_WAIT2,
-    TCP_TIME_WAIT,
+    TCP_TIME_WAIT, // 6
     TCP_CLOSE,
     TCP_CLOSE_WAIT,
     TCP_LAST_ACK,
-    TCP_LISTEN,
-    TCP_CLOSING 
+    TCP_LISTEN, // 10
+    TCP_CLOSING,    /* Now a valid state */
+    TCP_NEW_SYN_RECV,
+
+    TCP_MAX_STATES  /* Leave at the end! */
 };
 
 /*
@@ -57,129 +59,6 @@ static const char* tcp_states_map[]={
 //There are currently 11 states, but the first state is stored in pos. 1.
 //Therefore, I need a 12 bit bitmask
 #define TCPF_ALL 0xFFF
-
-//Copied from libmnl source
-#define SOCKET_BUFFER_SIZE (getpagesize() < 8192L ? getpagesize() : 8192L)
-
-//Example of diag_filtering, checks if destination port is <= 1000
-//
-//The easies way to understand filters, is to look at how the kernel
-//processes them. This is done in the function inet_diag_bc_run() in
-//inet_diag.c. The yes/no contains offsets to the next condition or aborts
-//the loop by making the variable len in inet_diag_bc_run() negative. There
-//are some limitations to the yes/no values, see inet_diag_bc_audit();
-/*
-unsigned char create_filter(void **filter_mem){
-    struct inet_diag_bc_op *bc_op = NULL;
-    unsigned char filter_len = sizeof(struct inet_diag_bc_op)*2;
-    if((*filter_mem = calloc(filter_len, 1)) == NULL)
-        return 0;
-
-    bc_op = (struct inet_diag_bc_op*) *filter_mem; 
-    bc_op->code = INET_DIAG_BC_D_LE;
-    bc_op->yes = sizeof(struct inet_diag_bc_op)*2;
-    //Only way to stop loop is to make len negative
-    bc_op->no = 12;
-
-    //For a port check, the port to check for is stored in the no field of a
-    //follow-up bc_op-struct.
-    bc_op = bc_op+1;
-    bc_op->no = 1000;
-
-    return filter_len;
-}*/
-
-int send_diag_msg(int sockfd){
-    struct msghdr msg;
-    struct nlmsghdr nlh;
-    //To request information about unix sockets, this would be replaced with
-    //unix_diag_req, packet-sockets packet_diag_req.
-    struct inet_diag_req_v2 conn_req;
-    struct sockaddr_nl sa;
-    struct iovec iov[4];
-    int retval = 0;
-
-    //For the filter
-    void *filter_mem = NULL;
-
-    memset(&msg, 0, sizeof(msg));
-    memset(&sa, 0, sizeof(sa));
-    memset(&nlh, 0, sizeof(nlh));
-    memset(&conn_req, 0, sizeof(conn_req));
-
-    //No need to specify groups or pid. This message only has one receiver and
-    //pid 0 is kernel
-    sa.nl_family = AF_NETLINK;
-
-    //Address family and protocol we are interested in. sock_diag can also be 
-    //used with UDP sockets, DCCP sockets and Unix sockets, to mention a few.
-    //This example requests information about TCP sockets bound to IPv4
-    //addresses.
-    conn_req.sdiag_family = AF_INET;
-    conn_req.sdiag_protocol = IPPROTO_TCP;
-
-    //Filter out some states, to show how it is done
-    conn_req.idiag_states = TCPF_ALL & 
-        ~((1<<TCP_SYN_RECV) | (1<<TCP_TIME_WAIT) | (1<<TCP_CLOSE));
-
-    //Request extended TCP information (it is the tcp_info struct)
-    //ext is a bitmask containing the extensions I want to acquire. The values
-    //are defined in inet_diag.h (the INET_DIAG_*-constants).
-    conn_req.idiag_ext |= (1 << (INET_DIAG_INFO - 1));
-    
-    nlh.nlmsg_len = NLMSG_LENGTH(sizeof(conn_req));
-    //In order to request a socket bound to a specific IP/port, remove
-    //NLM_F_DUMP and specify the required information in conn_req.id
-    nlh.nlmsg_flags = NLM_F_DUMP | NLM_F_REQUEST;
-
-    //Example of how to only match some sockets
-    //In order to match a single socket, I have to provide all fields
-    //sport/dport, saddr/daddr (look at dump_on_icsk)
-    //conn_req.id.idiag_dport=htons(443);
-
-    //Avoid using compat by specifying family + protocol in header
-    nlh.nlmsg_type = SOCK_DIAG_BY_FAMILY;
-    iov[0].iov_base = (void*) &nlh;
-    iov[0].iov_len = sizeof(nlh);
-    iov[1].iov_base = (void*) &conn_req;
-    iov[1].iov_len = sizeof(conn_req);
-
-    //Remove the if 0 to test the filter
-#if 0
-    if((filter_len = create_filter(&filter_mem)) > 0){
-        memset(&rta, 0, sizeof(rta));
-        rta.rta_type = INET_DIAG_REQ_BYTECODE;
-        rta.rta_len = RTA_LENGTH(filter_len);
-        iov[2] = (struct iovec){&rta, sizeof(rta)};
-        iov[3] = (struct iovec){filter_mem, filter_len};
-        nlh.nlmsg_len += rta.rta_len;
-    }
-#endif
-
-    //Set essage correctly
-    msg.msg_name = (void*) &sa;
-    msg.msg_namelen = sizeof(sa);
-    msg.msg_iov = iov;
-    if(filter_mem == NULL)
-        msg.msg_iovlen = 2;
-    else
-        msg.msg_iovlen = 4;
-   
-    retval = sendmsg(sockfd, &msg, 0);
-
-    if(filter_mem != NULL)
-        free(filter_mem);
-
-    return retval;
-}
-
-static uint64_t
-link_tag(struct inet_diag_msg *msg) {
-    uint32_t src = *((uint32_t*)msg->id.idiag_src);
-    uint32_t dst = *((uint32_t*)msg->id.idiag_dst);
-
-    return (((uint64_t)src) << 32) | dst;
-}
 
 static void
 link_delete(link_snapshot *link) {
@@ -205,18 +84,35 @@ link_create(struct inet_diag_msg *diag_msg) {
         inet_ntop(AF_INET, (struct in_addr*) &(diag_msg->id.idiag_dst), 
             link->remote_addr_buf, INET_ADDRSTRLEN);
 
-        link->tag = link_tag(diag_msg);
+        link->srcip = diag_msg->id.idiag_src[0];
+        link->dstip = diag_msg->id.idiag_dst[0];
+        link->sport = diag_msg->id.idiag_sport;
+        link->dport = diag_msg->id.idiag_dport;
+
         link->send_acc = 0;
         link->recv_acc = 0;
         link->next = 0;
 
         char buf[256];
 
+        char sport[256];
+        char dport[256];
+
+        memset(sport, 0, 256);
+        memset(dport, 0, 256);
+
+        snprintf(sport, 256, "%d", ntohs(link->sport));
+        snprintf(dport, 256, "%d", ntohs(link->dport));
+
         buf[0] = 0;
         strcat(buf, "proc/net/");
         strcat(buf, link->local_addr_buf);
         strcat(buf, "/");
         strcat(buf, link->remote_addr_buf);
+        strcat(buf, "/");
+        strcat(buf, sport);
+        strcat(buf, "/");
+        strcat(buf, dport);
         strcat(buf, "/sbytes");
         history_create(&link->send, buf);
         link->send->transform = transform_identity;
@@ -226,6 +122,10 @@ link_create(struct inet_diag_msg *diag_msg) {
         strcat(buf, link->local_addr_buf);
         strcat(buf, "/");
         strcat(buf, link->remote_addr_buf);
+        strcat(buf, "/");
+        strcat(buf, sport);
+        strcat(buf, "/");
+        strcat(buf, dport);
         strcat(buf, "/rbytes");
         history_create(&link->recv, buf);
         link->recv->transform = transform_identity;
@@ -243,10 +143,16 @@ static link_snapshot*
 link_find_or_create(link_snapshot **links, struct inet_diag_msg *diag_msg) {
     link_snapshot *cur = *links;
 
-    uint64_t tag = link_tag(diag_msg);
+    uint32_t src = diag_msg->id.idiag_src[0];
+    uint32_t dst = diag_msg->id.idiag_dst[0];
+    uint32_t sport = diag_msg->id.idiag_sport;
+    uint32_t dport = diag_msg->id.idiag_dport;
 
     while (cur) {
-        if (cur->tag == tag)
+        if ((cur->srcip == src) &&
+                (cur->dstip == dst) &&
+                (cur->sport == sport) &&
+                (cur->dport == dport))
             return cur;
         cur = cur->next;
     }
@@ -265,11 +171,28 @@ socket_get_inode(struct inet_diag_msg *msg) {
 
 static socket_stat *
 socket_create(socket_stat **socks, struct inet_diag_msg *diag_msg) {
+    // If the connection is already closed, we aren't interested in
+    // it.
+    //
+    // XXX: Truth is, we actually might be, if the life of a connection is
+    // shorter than EPOCH (defined in main.c) seconds.
+    if (diag_msg->idiag_state == TCP_CLOSE) {
+        return 0;
+    }
+
     socket_stat *sock = (socket_stat *)malloc(sizeof(socket_stat));
 
     sock->bytes_received = 0;
     sock->bytes_acked = 0;
+
+    sock->last_sent = 0;
+    sock->last_recv = 0;
+
     sock->inode = socket_get_inode(diag_msg);
+    sock->srcip = diag_msg->id.idiag_src[0];
+    sock->dstip = diag_msg->id.idiag_dst[0];
+    sock->sport = diag_msg->id.idiag_sport;
+    sock->dport = diag_msg->id.idiag_dport;
 
     sock->next = *socks;
     *socks = sock;
@@ -285,10 +208,19 @@ socket_delete(socket_stat *socks) {
 static socket_stat *
 socket_find_or_create(socket_stat **socks, struct inet_diag_msg *diag_msg) {
     socket_stat *sock = *socks;
+
     uint32_t inode = socket_get_inode(diag_msg);
+    uint32_t src = diag_msg->id.idiag_src[0];
+    uint32_t dst = diag_msg->id.idiag_dst[0];
+    uint32_t sport = diag_msg->id.idiag_sport;
+    uint32_t dport = diag_msg->id.idiag_dport;
 
     while (sock) {
-        if (sock->inode == inode) {
+        if ((sock->inode == inode) && 
+                (sock->srcip == src) &&
+                (sock->dstip == dst) &&
+                (sock->sport == sport) &&
+                (sock->dport == dport)) {
             return sock;
         }
         sock = sock->next;
@@ -298,124 +230,160 @@ socket_find_or_create(socket_stat **socks, struct inet_diag_msg *diag_msg) {
 }
 
 static void
-parse_diag_msg(struct inet_diag_msg *diag_msg, int rtalen, links_snapshot *links){
-    struct rtattr *attr;
-    struct tcp_info *tcpi;
+log_socket(struct inet_diag_msg *diag_msg, uint64_t time) {
+    char buf[256] = {0};
+    char src[16] = {0};
+    char dst[16] = {0};
 
+    char sport[8] = {0}; 
+    char dport[8] = {0}; 
+
+    char state[4] = {0};
+
+
+    inet_ntop(AF_INET, (struct in_addr*) &(diag_msg->id.idiag_src), 
+        src, INET_ADDRSTRLEN);
+    inet_ntop(AF_INET, (struct in_addr*) &(diag_msg->id.idiag_dst), 
+        dst, INET_ADDRSTRLEN);
+    snprintf(sport, 8, "%d", ntohs(diag_msg->id.idiag_sport));
+    snprintf(dport, 8, "%d", ntohs(diag_msg->id.idiag_dport));
+    snprintf(state, 4, "%d", diag_msg->idiag_state);
+
+    strcat(buf, "%" PRIu64);
+    strcat(buf, " - ");
+    strcat(buf, src);
+    strcat(buf, ":");
+    strcat(buf, sport);
+    strcat(buf, "/");
+    strcat(buf, dst);
+    strcat(buf, ":");
+    strcat(buf, dport);
+    strcat(buf, " --> ");
+    strcat(buf, state);
+    strcat(buf, "\n");
+
+    printf(buf, time);
+}
+
+static int
+inet_diag_msg_type(struct nlattr const *nlattr, void *data) {
+    if (mnl_attr_get_type(nlattr) != INET_DIAG_INFO)
+        return MNL_CB_OK;
+
+    const struct tcp_info **tcpi = data;
+    *tcpi = mnl_attr_get_payload(nlattr);
+    return MNL_CB_OK;
+}
+
+static int
+inet_diag_msg_history(struct tcp_info *tcpi, struct inet_diag_msg *diag_msg, links_snapshot *links) {
     link_snapshot *link = link_find_or_create(&links->links, diag_msg);
     socket_stat *sock = socket_find_or_create(&links->sockets, diag_msg);
-    //assert(sock == socket_find_or_create(&links->sockets, diag_msg));
 
-    //Parse the attributes of the netlink message in search of the
-    //INET_DIAG_INFO-attribute
-    if(rtalen > 0){
-        attr = (struct rtattr*) (diag_msg+1);
-
-        while(RTA_OK(attr, rtalen)){
-            if(attr->rta_type == INET_DIAG_INFO){
-                //The payload of this attribute is a tcp_info-struct, so it is
-                //ok to cast
-                tcpi = (struct tcp_info*) RTA_DATA(attr);
-
-                if (sock->is_new) {
-                    sock->is_new = false;
-                }
-
-                if (links->sync) {
-                    sock->bytes_received = tcpi->tcpi_bytes_received;
-                    sock->bytes_acked = tcpi->tcpi_bytes_acked;
-                }
-
-                if ((tcpi->tcpi_bytes_received < sock->bytes_received)) {
-                    // Assume that the socket restarted :-(
-                    printf("Maybe the socket reseted? Can't handle this case ...\n");
-                    sock->bytes_received = 0;
-                    sock->bytes_acked = 0;
-                }
-
-                if (tcpi->tcpi_bytes_acked < sock->bytes_acked) {
-                    printf("Did the socket reset? Can't handle this case ...\n");
-                    sock->bytes_acked = 0;
-                    sock->bytes_received = 0;
-                }
-
-                link->recv_acc += (tcpi->tcpi_bytes_received - sock->bytes_received);
-                link->send_acc += (tcpi->tcpi_bytes_acked - sock->bytes_acked);
-
-                link->time = links->time;
-
-                sock->bytes_received = tcpi->tcpi_bytes_received;
-                sock->bytes_acked = tcpi->tcpi_bytes_acked;
-
-                sock->used = true;
-
-                //Output some sample data
-                /*
-                fprintf(stdout, "\tState: %s RTT: %gms (var. %gms) "
-                        "Recv. RTT: %gms Snd_cwnd: %u/%u\n",
-                        tcp_states_map[tcpi->tcpi_state],
-                        (double) tcpi->tcpi_rtt/1000, 
-                        (double) tcpi->tcpi_rttvar/1000,
-                        (double) tcpi->tcpi_rcv_rtt/1000, 
-                        tcpi->tcpi_unacked,
-                        tcpi->tcpi_snd_cwnd);
-                */
-            }
-            attr = RTA_NEXT(attr, rtalen); 
-        }
+    log_socket(diag_msg, links->time);
+    /* If this is the first time that we are syncing the
+     * link, just remember the tcpi_bytes_received and
+     * tcpi_bytes_acked */
+    if (links->sync) {
+        sock->bytes_received = tcpi->tcpi_bytes_received;
+        sock->bytes_acked = tcpi->tcpi_bytes_acked;
     }
+
+    /* If the last data sent is older than the data that we
+     * remembered update the counters */
+    //if (tcpi->tcpi_last_data_sent > sock->last_sent) {
+    link->send_acc += (tcpi->tcpi_bytes_acked - sock->bytes_acked);
+    sock->last_sent = tcpi->tcpi_last_data_sent;
+    sock->bytes_acked = tcpi->tcpi_bytes_acked;
+    //}
+
+    //if (tcpi->tcpi_last_data_recv > sock->last_recv) {
+    link->recv_acc += (tcpi->tcpi_bytes_received - sock->bytes_received);
+    sock->last_recv = tcpi->tcpi_last_data_recv;
+    sock->bytes_received = tcpi->tcpi_bytes_received;
+    //}
+
+    link->time = links->time;
+    sock->used = true;
+    return 0;
+}
+
+static int
+inet_diag_parse(struct nlmsghdr const *nlh, void *data){
+    struct inet_diag_msg *msg = mnl_nlmsg_get_payload(nlh);
+    char src[17] = {0};
+    char dst[17] = {0};
+
+    inet_ntop(AF_INET, (void const*)msg->id.idiag_src, src, 16);
+    inet_ntop(AF_INET, (void const*)msg->id.idiag_dst, dst, 16);
+
+    struct tcp_info *tcpi = 0;
+    mnl_attr_parse(nlh, sizeof(struct inet_diag_msg), inet_diag_msg_type, &tcpi);
+
+    if (!tcpi)
+        return MNL_CB_OK;
+
+    links_snapshot *links = (void *)data;
+    inet_diag_msg_history(tcpi, msg, links);
+
+    return MNL_CB_OK;
 }
 
 static void
 links_stat (links_snapshot* links) {
-    int nl_sock = 0, numbytes = 0, rtalen = 0;
-    struct nlmsghdr *nlh;
-    uint8_t recv_buf[SOCKET_BUFFER_SIZE];
-    struct inet_diag_msg *diag_msg;
+	int ret;
+	unsigned int seq, portid;
 
-    //Create the monitoring socket
-    if((nl_sock = socket(AF_NETLINK, SOCK_DGRAM, NETLINK_INET_DIAG)) == -1){
-        perror("socket: ");
-        return;
-    }
+    struct mnl_socket *nl;
+	struct nlmsghdr *nlh;
+    struct inet_diag_req_v2* conn_req;
 
-    //Send the request for the sockets we are interested in
-    if(send_diag_msg(nl_sock) < 0){
-        perror("sendmsg: ");
-        close(nl_sock);
-        return;
-    }
+	char buf[MNL_SOCKET_BUFFER_SIZE];
 
-    //The requests can (will in most cases) come as multiple netlink messages. I
-    //need to receive all of them. Assumes no packet loss, so if the last packet
-    //(the packet with NLMSG_DONE) is lost, the application will hang.
-    while(1){
-        numbytes = recv(nl_sock, recv_buf, sizeof(recv_buf), 0);
-        links->time = unified_time();
-        nlh = (struct nlmsghdr*) recv_buf;
+	nlh = mnl_nlmsg_put_header(buf);
+	nlh->nlmsg_type	= SOCK_DIAG_BY_FAMILY; //RTM_GETLINK;
+	nlh->nlmsg_flags = NLM_F_REQUEST | NLM_F_DUMP;
+	nlh->nlmsg_seq = seq = time(NULL);
 
-        while(NLMSG_OK(nlh, numbytes)){
-            if(nlh->nlmsg_type == NLMSG_DONE) {
-                close(nl_sock);
-                return;
-            }
+    conn_req = mnl_nlmsg_put_extra_header(nlh, sizeof(struct inet_diag_req_v2));
+    conn_req->idiag_ext = (1 << (INET_DIAG_INFO -1));
+    conn_req->sdiag_family = AF_INET;
+    conn_req->sdiag_protocol = IPPROTO_TCP;
 
-            if(nlh->nlmsg_type == NLMSG_ERROR){
-                fprintf(stderr, "Error in netlink message\n");
-                close(nl_sock);
-                return;
-            }
+    //Filter->out some states, to show how it is done
+    conn_req->idiag_states = 0xfff;
 
-            diag_msg = (struct inet_diag_msg*) NLMSG_DATA(nlh);
-            rtalen = nlh->nlmsg_len - NLMSG_LENGTH(sizeof(*diag_msg));
-            parse_diag_msg(diag_msg, rtalen, links);
+	nl = mnl_socket_open(NETLINK_INET_DIAG);
+	if (nl == NULL) {
+		perror("mnl_socket_open");
+		exit(EXIT_FAILURE);
+	}
 
-            nlh = NLMSG_NEXT(nlh, numbytes); 
-        }
-    }
+	if (mnl_socket_bind(nl, 0, MNL_SOCKET_AUTOPID) < 0) {
+		perror("mnl_socket_bind");
+		exit(EXIT_FAILURE);
+	}
+	portid = mnl_socket_get_portid(nl);
 
-    close(nl_sock);
-    return;
+	if (mnl_socket_sendto(nl, nlh, nlh->nlmsg_len) < 0) {
+		perror("mnl_socket_sendto");
+		exit(EXIT_FAILURE);
+	}
+
+	ret = mnl_socket_recvfrom(nl, buf, sizeof(buf));
+	while (ret > 0) {
+		ret = mnl_cb_run(buf, ret, seq, portid, inet_diag_parse, (void *)links);
+		if (ret <= MNL_CB_STOP)
+			break;
+		ret = mnl_socket_recvfrom(nl, buf, sizeof(buf));
+	}
+
+	if (ret == -1) {
+		perror("error");
+		exit(EXIT_FAILURE);
+	}
+
+	mnl_socket_close(nl);
 }
 
 void links_snapshot_create(links_snapshot **links) {
@@ -465,11 +433,16 @@ void links_persist(links_snapshot *links) {
     link_snapshot *link = links->links;
 
     while (link) {
-        history_append(link->recv, link->time, link->recv_acc);
-        history_append(link->send, link->time, link->send_acc);
+        /* If link was used during the past epoch save it's statistics */
+        if (link->time != 0) {
+            history_append(link->recv, link->time, link->recv_acc);
+            history_append(link->send, link->time, link->send_acc);
+            link->time = 0;
+        }
         link = link->next;
     }
 
+    /*
     socket_stat **sock = &links->sockets;
     socket_stat *tmp = 0;
 
@@ -484,6 +457,7 @@ void links_persist(links_snapshot *links) {
         (*sock)->used = false;
         sock = &(*sock)->next;
     }
+    */
 }
 
 void links_snapshot_tick(links_snapshot *links) {
