@@ -1,4 +1,6 @@
 #define _BSD_SOURCE
+#define GROUP_TCP_ON_LINK
+#undef GROUP_TCP_ON_LINK
 
 #include <assert.h>
 #include <inttypes.h>
@@ -109,10 +111,12 @@ link_create(struct inet_diag_msg *diag_msg) {
         strcat(buf, link->local_addr_buf);
         strcat(buf, "/");
         strcat(buf, link->remote_addr_buf);
+#ifndef GROUP_TCP_ON_LINK
         strcat(buf, "/");
         strcat(buf, sport);
         strcat(buf, "/");
         strcat(buf, dport);
+#endif
         strcat(buf, "/sbytes");
         history_create(&link->send, buf);
         link->send->transform = transform_identity;
@@ -122,10 +126,12 @@ link_create(struct inet_diag_msg *diag_msg) {
         strcat(buf, link->local_addr_buf);
         strcat(buf, "/");
         strcat(buf, link->remote_addr_buf);
+#ifndef GROUP_TCP_ON_LINK
         strcat(buf, "/");
         strcat(buf, sport);
         strcat(buf, "/");
         strcat(buf, dport);
+#endif
         strcat(buf, "/rbytes");
         history_create(&link->recv, buf);
         link->recv->transform = transform_identity;
@@ -145,15 +151,24 @@ link_find_or_create(link_snapshot **links, struct inet_diag_msg *diag_msg) {
 
     uint32_t src = diag_msg->id.idiag_src[0];
     uint32_t dst = diag_msg->id.idiag_dst[0];
+
+#ifndef GROUP_TCP_ON_LINK
     uint32_t sport = diag_msg->id.idiag_sport;
     uint32_t dport = diag_msg->id.idiag_dport;
+#endif
 
     while (cur) {
+#ifdef GROUP_TCP_ON_LINK
+        if ((cur->srcip == src) &&
+                (cur->dstip == dst))
+            return cur;
+#else
         if ((cur->srcip == src) &&
                 (cur->dstip == dst) &&
                 (cur->sport == sport) &&
                 (cur->dport == dport))
             return cur;
+#endif
         cur = cur->next;
     }
 
@@ -240,11 +255,11 @@ log_socket(struct inet_diag_msg *diag_msg, uint64_t time) {
 
     char state[4] = {0};
 
-
     inet_ntop(AF_INET, (struct in_addr*) &(diag_msg->id.idiag_src), 
         src, INET_ADDRSTRLEN);
     inet_ntop(AF_INET, (struct in_addr*) &(diag_msg->id.idiag_dst), 
         dst, INET_ADDRSTRLEN);
+
     snprintf(sport, 8, "%d", ntohs(diag_msg->id.idiag_sport));
     snprintf(dport, 8, "%d", ntohs(diag_msg->id.idiag_dport));
     snprintf(state, 4, "%d", diag_msg->idiag_state);
@@ -324,6 +339,7 @@ inet_diag_parse(struct nlmsghdr const *nlh, void *data){
         return MNL_CB_OK;
 
     links_snapshot *links = (void *)data;
+    links->time = unified_time();
     inet_diag_msg_history(tcpi, msg, links);
 
     return MNL_CB_OK;
@@ -463,6 +479,7 @@ void links_persist(links_snapshot *links) {
 void links_snapshot_tick(links_snapshot *links) {
     links_reset(links);
     links_stat(links);
+    printf("----------------------------------------\n");
     links_persist(links);
 
     if (links->sync)
