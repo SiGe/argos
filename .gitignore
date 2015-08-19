@@ -17,4 +17,6 @@ stamp-h?
 autoconf.log
 *.l[ao]
 *~
+*.o
+proc/
 compile

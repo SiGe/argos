@@ -1,6 +1,6 @@
 #define _BSD_SOURCE
 #define GROUP_TCP_ON_LINK
-#undef GROUP_TCP_ON_LINK
+#define IGNORE_LOCAL_CONNECTIONS
 
 #include <assert.h>
 #include <inttypes.h>
@@ -292,6 +292,11 @@ inet_diag_msg_type(struct nlattr const *nlattr, void *data) {
 
 static int
 inet_diag_msg_history(struct tcp_info *tcpi, struct inet_diag_msg *diag_msg, links_snapshot *links) {
+#ifdef IGNORE_LOCAL_CONNECTIONS
+    if (diag_msg->id.idiag_src[0] == diag_msg->id.idiag_dst[0])
+        return 0;
+#endif
+
     link_snapshot *link = link_find_or_create(&links->links, diag_msg);
     socket_stat *sock = socket_find_or_create(&links->sockets, diag_msg);
 
@@ -457,23 +462,6 @@ void links_persist(links_snapshot *links) {
         }
         link = link->next;
     }
-
-    /*
-    socket_stat **sock = &links->sockets;
-    socket_stat *tmp = 0;
-
-    while (*sock) {
-        if (!(*sock)->used) {
-            tmp = *sock;
-            *sock = (*sock)->next;
-            socket_delete(tmp);
-            continue;
-        }
-
-        (*sock)->used = false;
-        sock = &(*sock)->next;
-    }
-    */
 }
 
 void links_snapshot_tick(links_snapshot *links) {

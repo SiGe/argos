@@ -22,13 +22,9 @@ uint32_t freq = 0;
 #define MONITOR_FREQ 10
 
 void monitors_create(void) {
-    if (freq++ > MONITOR_FREQ) {
-        cpu_snapshot_create(&cpu);
-        memory_snapshot_create(&mem);
-        disks_snapshot_create(&disks);
-        freq = 0;
-    }
-
+    cpu_snapshot_create(&cpu);
+    memory_snapshot_create(&mem);
+    disks_snapshot_create(&disks);
     links_snapshot_create(&links);
 }
 
@@ -40,9 +36,12 @@ void monitors_delete(void) {
 }
 
 void monitors_tick(void) {
-    cpu_snapshot_tick(cpu);
-    memory_snapshot_tick(mem);
-    disks_snapshot_tick(disks);
+    if (freq++ > MONITOR_FREQ) {
+        cpu_snapshot_tick(cpu);
+        memory_snapshot_tick(mem);
+        disks_snapshot_tick(disks);
+        freq = 0;
+    }
     links_snapshot_tick(links);
 }
 
