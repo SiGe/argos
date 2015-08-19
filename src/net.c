@@ -4,6 +4,7 @@
 
 #include <assert.h>
 #include <inttypes.h>
+#include <pcap/pcap.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -58,6 +59,66 @@ static const char* tcp_states_map[]={
 };
 */
 
+typedef struct __attribute__((packed))
+tcp_packet {
+    // 14 bytes
+    uint32_t eth_smac_u;
+    uint16_t eth_smac_l;
+    uint32_t eth_dmac_u;
+    uint16_t eth_dmac_l;
+    uint16_t eth_ethertype;
+    
+    // 5 * 32 bits
+    // Remember that network byte order is the other way around
+#ifdef __LITTLE_ENDIAN_BITFIELD
+    unsigned int ip_ihl : 4;
+    unsigned int ip_version : 4;
+#endif
+
+    // 20 bytes
+    uint8_t ip_tos;
+    uint16_t ip_len;
+    uint16_t ip_ident;
+    unsigned int ip_flags : 3;
+    unsigned int ip_frag : 13;
+    uint8_t ip_ttl;
+    uint8_t ip_proto;
+    uint16_t ip_chksum;
+    uint32_t ip_src;
+    uint32_t ip_dst;
+
+    // 5 * 32 bits
+    uint16_t tcp_sport;
+    uint16_t tcp_dport;
+    uint32_t tcp_seq;
+    uint32_t tcp_ack;
+
+    unsigned int tcp_reserve: 3;
+    unsigned int tcp_ns : 1;
+    unsigned int tcp_offset : 4;
+
+    union {
+        struct __attribute__((packed)) {
+            uint8_t flags;
+        } packed;
+
+        struct __attribute__((packed)) {
+            unsigned int tcp_cwr : 1;
+            unsigned int tcp_ere : 1;
+            unsigned int tcp_urg : 1;
+            unsigned int tcp_ack : 1;
+            unsigned int tcp_psh : 1;
+            unsigned int tcp_rst : 1;
+            unsigned int tcp_syn : 1;
+            unsigned int tcp_fin : 1;
+        } unpacked;
+    } tcp_flags;
+
+    uint16_t tcp_wndsize;
+    uint16_t tcp_chksum;
+    uint16_t tcp_ptr;
+} tcp_packet;
+
 //There are currently 11 states, but the first state is stored in pos. 1.
 //Therefore, I need a 12 bit bitmask
 #define TCPF_ALL 0xFFF
@@ -74,88 +135,76 @@ link_delete(link_snapshot *link) {
 }
 
 static link_snapshot *
-link_create(struct inet_diag_msg *diag_msg) {
+link_create(uint32_t _src, uint32_t _dst, uint16_t _sport, uint16_t _dport) {
     link_snapshot *link = (link_snapshot *)malloc(sizeof(link_snapshot));
 
     memset(link->local_addr_buf, 0, sizeof(link->local_addr_buf));
     memset(link->remote_addr_buf, 0, sizeof(link->remote_addr_buf));
 
-    if(diag_msg->idiag_family == AF_INET){
-        inet_ntop(AF_INET, (struct in_addr*) &(diag_msg->id.idiag_src), 
-            link->local_addr_buf, INET_ADDRSTRLEN);
-        inet_ntop(AF_INET, (struct in_addr*) &(diag_msg->id.idiag_dst), 
-            link->remote_addr_buf, INET_ADDRSTRLEN);
+    inet_ntop(AF_INET, (struct in_addr*) &_src, 
+        link->local_addr_buf, INET_ADDRSTRLEN);
+    inet_ntop(AF_INET, (struct in_addr*) &_dst, 
+        link->remote_addr_buf, INET_ADDRSTRLEN);
 
-        link->srcip = diag_msg->id.idiag_src[0];
-        link->dstip = diag_msg->id.idiag_dst[0];
-        link->sport = diag_msg->id.idiag_sport;
-        link->dport = diag_msg->id.idiag_dport;
+    link->srcip = _src;
+    link->dstip = _dst;
+    link->sport = _sport;
+    link->dport = _dport;
 
-        link->send_acc = 0;
-        link->recv_acc = 0;
-        link->next = 0;
+    link->send_acc = 0;
+    link->recv_acc = 0;
+    link->next = 0;
 
-        char buf[256];
+    char buf[256];
 
-        char sport[256];
-        char dport[256];
+    char sport[256];
+    char dport[256];
 
-        memset(sport, 0, 256);
-        memset(dport, 0, 256);
+    memset(sport, 0, 256);
+    memset(dport, 0, 256);
 
-        snprintf(sport, 256, "%d", ntohs(link->sport));
-        snprintf(dport, 256, "%d", ntohs(link->dport));
+    snprintf(sport, 256, "%d", ntohs(link->sport));
+    snprintf(dport, 256, "%d", ntohs(link->dport));
 
-        buf[0] = 0;
-        strcat(buf, "proc/net/");
-        strcat(buf, link->local_addr_buf);
-        strcat(buf, "/");
-        strcat(buf, link->remote_addr_buf);
+    buf[0] = 0;
+    strcat(buf, "proc/net/");
+    strcat(buf, link->local_addr_buf);
+    strcat(buf, "/");
+    strcat(buf, link->remote_addr_buf);
 #ifndef GROUP_TCP_ON_LINK
-        strcat(buf, "/");
-        strcat(buf, sport);
-        strcat(buf, "/");
-        strcat(buf, dport);
+    strcat(buf, "/");
+    strcat(buf, sport);
+    strcat(buf, "/");
+    strcat(buf, dport);
 #endif
-        strcat(buf, "/sbytes");
-        history_create(&link->send, buf);
-        link->send->transform = transform_identity;
+    strcat(buf, "/sbytes");
+    history_create(&link->send, buf);
+    link->send->transform = transform_identity;
 
-        buf[0] = 0;
-        strcat(buf, "proc/net/");
-        strcat(buf, link->local_addr_buf);
-        strcat(buf, "/");
-        strcat(buf, link->remote_addr_buf);
+    //printf("Creating link -send (%p): %s\n", link, buf);
+
+    buf[0] = 0;
+    strcat(buf, "proc/net/");
+    strcat(buf, link->local_addr_buf);
+    strcat(buf, "/");
+    strcat(buf, link->remote_addr_buf);
 #ifndef GROUP_TCP_ON_LINK
-        strcat(buf, "/");
-        strcat(buf, sport);
-        strcat(buf, "/");
-        strcat(buf, dport);
+    strcat(buf, "/");
+    strcat(buf, sport);
+    strcat(buf, "/");
+    strcat(buf, dport);
 #endif
-        strcat(buf, "/rbytes");
-        history_create(&link->recv, buf);
-        link->recv->transform = transform_identity;
+    strcat(buf, "/rbytes");
+    history_create(&link->recv, buf);
+    link->recv->transform = transform_identity;
 
-    } else {
-        /* We do not handle ipv6 nor other protocols */
-        fprintf(stderr, "Unknown family\n");
-        free(link);
-        return 0;
-    }
+    //printf("Creating link -recv (%p): %s\n", link, buf);
     return link;
 }
 
 static link_snapshot*
-link_find_or_create(link_snapshot **links, struct inet_diag_msg *diag_msg) {
+link_find_or_create(link_snapshot **links, uint32_t src, uint32_t dst, uint32_t sport, uint32_t dport) {
     link_snapshot *cur = *links;
-
-    uint32_t src = diag_msg->id.idiag_src[0];
-    uint32_t dst = diag_msg->id.idiag_dst[0];
-
-#ifndef GROUP_TCP_ON_LINK
-    uint32_t sport = diag_msg->id.idiag_sport;
-    uint32_t dport = diag_msg->id.idiag_dport;
-#endif
 
     while (cur) {
 #ifdef GROUP_TCP_ON_LINK
@@ -172,253 +221,74 @@ link_find_or_create(link_snapshot **links, struct inet_diag_msg *diag_msg) {
         cur = cur->next;
     }
 
-    cur = link_create(diag_msg);
+    cur = link_create(src, dst, sport, dport);
     cur->next = *links;
     *links = cur;
 
     return cur;
 }
 
-static uint32_t
-socket_get_inode(struct inet_diag_msg *msg) {
-    return msg->idiag_inode;
-}
-
-static socket_stat *
-socket_create(socket_stat **socks, struct inet_diag_msg *diag_msg) {
-    // If the connection is already closed, we aren't interested in
-    // it.
-    //
-    // XXX: Truth is, we actually might be, if the life of a connection is
-    // shorter than EPOCH (defined in main.c) seconds.
-    if (diag_msg->idiag_state == TCP_CLOSE) {
-        return 0;
-    }
-
-    socket_stat *sock = (socket_stat *)malloc(sizeof(socket_stat));
-
-    sock->bytes_received = 0;
-    sock->bytes_acked = 0;
-
-    sock->last_sent = 0;
-    sock->last_recv = 0;
-
-    sock->inode = socket_get_inode(diag_msg);
-    sock->srcip = diag_msg->id.idiag_src[0];
-    sock->dstip = diag_msg->id.idiag_dst[0];
-    sock->sport = diag_msg->id.idiag_sport;
-    sock->dport = diag_msg->id.idiag_dport;
-
-    sock->next = *socks;
-    *socks = sock;
-
-    return sock;
-}
-
 static void
-socket_delete(socket_stat *socks) {
-    free(socks);
+packets_process(u_char *data, struct pcap_pkthdr* const pkthdr, u_char* const pkt_data) {
+    links_snapshot *links = (links_snapshot *)data;
+    if ((pkthdr->len < sizeof(tcp_packet)) || (pkthdr->caplen < sizeof(tcp_packet))) return;
+
+    tcp_packet *pkt = (struct tcp_packet *)pkt_data;
+
+    // Reverse byte order
+    if (pkt->eth_ethertype != 0x008) return;
+    if (pkt->ip_proto != 0x06) return;
+
+    uint16_t len = ntohs(pkt->ip_len);
+
+    if ((len - (pkt->tcp_offset * 4)) <= (sizeof(tcp_packet)-14)) return;
+
+    link_snapshot *link = link_find_or_create(&(links->links), pkt->ip_src, pkt->ip_dst, pkt->tcp_sport, pkt->tcp_dport);
+    link->send_acc += (len - 14 - 20 - 4*pkt->tcp_offset);
 }
 
-static socket_stat *
-socket_find_or_create(socket_stat **socks, struct inet_diag_msg *diag_msg) {
-    socket_stat *sock = *socks;
+static void* 
+packets_loop(void *data) {
+    char errbuf[PCAP_ERRBUF_SIZE];
+    char *devname = pcap_lookupdev(errbuf);
 
-    uint32_t inode = socket_get_inode(diag_msg);
-    uint32_t src = diag_msg->id.idiag_src[0];
-    uint32_t dst = diag_msg->id.idiag_dst[0];
-    uint32_t sport = diag_msg->id.idiag_sport;
-    uint32_t dport = diag_msg->id.idiag_dport;
+    if (!devname)
+    {printf("Could not find a suitable network device to monitor.\n"); return 0;}
 
-    while (sock) {
-        if ((sock->inode == inode) && 
-                (sock->srcip == src) &&
-                (sock->dstip == dst) &&
-                (sock->sport == sport) &&
-                (sock->dport == dport)) {
-            return sock;
-        }
-        sock = sock->next;
-    }
+    links_snapshot *links = (links_snapshot *)data;
+    links->dev = pcap_open_live(devname, 64, false, -1, errbuf);
 
-    return socket_create(socks, diag_msg);
-}
+    printf("Trying to monitor: %s\n", devname);
+    if (!links->dev)
+    {printf("Could not open the device to capture packets from: %s", devname); return 0;}
 
-static void
-log_socket(struct inet_diag_msg *diag_msg, uint64_t time) {
-    char buf[256] = {0};
-    char src[16] = {0};
-    char dst[16] = {0};
+    printf("Monitoring: %s\n", devname);
 
-    char sport[8] = {0}; 
-    char dport[8] = {0}; 
+    /* Loop forever while capturing packets */
+    pcap_loop(links->dev, -1, packets_process, data);
 
-    char state[4] = {0};
-
-    inet_ntop(AF_INET, (struct in_addr*) &(diag_msg->id.idiag_src), 
-        src, INET_ADDRSTRLEN);
-    inet_ntop(AF_INET, (struct in_addr*) &(diag_msg->id.idiag_dst), 
-        dst, INET_ADDRSTRLEN);
-
-    snprintf(sport, 8, "%d", ntohs(diag_msg->id.idiag_sport));
-    snprintf(dport, 8, "%d", ntohs(diag_msg->id.idiag_dport));
-    snprintf(state, 4, "%d", diag_msg->idiag_state);
-
-    strcat(buf, "%" PRIu64);
-    strcat(buf, " - ");
-    strcat(buf, src);
-    strcat(buf, ":");
-    strcat(buf, sport);
-    strcat(buf, "/");
-    strcat(buf, dst);
-    strcat(buf, ":");
-    strcat(buf, dport);
-    strcat(buf, " --> ");
-    strcat(buf, state);
-    strcat(buf, "\n");
-
-    printf(buf, time);
-}
-
-static int
-inet_diag_msg_type(struct nlattr const *nlattr, void *data) {
-    if (mnl_attr_get_type(nlattr) != INET_DIAG_INFO)
-        return MNL_CB_OK;
-
-    const struct tcp_info **tcpi = data;
-    *tcpi = mnl_attr_get_payload(nlattr);
-    return MNL_CB_OK;
-}
-
-static int
-inet_diag_msg_history(struct tcp_info *tcpi, struct inet_diag_msg *diag_msg, links_snapshot *links) {
-#ifdef IGNORE_LOCAL_CONNECTIONS
-    if (diag_msg->id.idiag_src[0] == diag_msg->id.idiag_dst[0])
-        return 0;
-#endif
-
-    link_snapshot *link = link_find_or_create(&links->links, diag_msg);
-    socket_stat *sock = socket_find_or_create(&links->sockets, diag_msg);
-
-    log_socket(diag_msg, links->time);
-    /* If this is the first time that we are syncing the
-     * link, just remember the tcpi_bytes_received and
-     * tcpi_bytes_acked */
-    if (links->sync) {
-        sock->bytes_received = tcpi->tcpi_bytes_received;
-        sock->bytes_acked = tcpi->tcpi_bytes_acked;
-    }
-
-    /* If the last data sent is older than the data that we
-     * remembered update the counters */
-    //if (tcpi->tcpi_last_data_sent > sock->last_sent) {
-    link->send_acc += (tcpi->tcpi_bytes_acked - sock->bytes_acked);
-    sock->last_sent = tcpi->tcpi_last_data_sent;
-    sock->bytes_acked = tcpi->tcpi_bytes_acked;
-    //}
-
-    //if (tcpi->tcpi_last_data_recv > sock->last_recv) {
-    link->recv_acc += (tcpi->tcpi_bytes_received - sock->bytes_received);
-    sock->last_recv = tcpi->tcpi_last_data_recv;
-    sock->bytes_received = tcpi->tcpi_bytes_received;
-    //}
-
-    link->time = links->time;
-    sock->used = true;
     return 0;
 }
 
-static int
-inet_diag_parse(struct nlmsghdr const *nlh, void *data){
-    struct inet_diag_msg *msg = mnl_nlmsg_get_payload(nlh);
-    char src[17] = {0};
-    char dst[17] = {0};
-
-    inet_ntop(AF_INET, (void const*)msg->id.idiag_src, src, 16);
-    inet_ntop(AF_INET, (void const*)msg->id.idiag_dst, dst, 16);
-
-    struct tcp_info *tcpi = 0;
-    mnl_attr_parse(nlh, sizeof(struct inet_diag_msg), inet_diag_msg_type, &tcpi);
-
-    if (!tcpi)
-        return MNL_CB_OK;
-
-    links_snapshot *links = (void *)data;
-    links->time = unified_time();
-    inet_diag_msg_history(tcpi, msg, links);
-
-    return MNL_CB_OK;
-}
-
-static void
-links_stat (links_snapshot* links) {
-	int ret;
-	unsigned int seq, portid;
-
-    struct mnl_socket *nl;
-	struct nlmsghdr *nlh;
-    struct inet_diag_req_v2* conn_req;
-
-	char buf[MNL_SOCKET_BUFFER_SIZE];
-
-	nlh = mnl_nlmsg_put_header(buf);
-	nlh->nlmsg_type	= SOCK_DIAG_BY_FAMILY; //RTM_GETLINK;
-	nlh->nlmsg_flags = NLM_F_REQUEST | NLM_F_DUMP;
-	nlh->nlmsg_seq = seq = time(NULL);
-
-    conn_req = mnl_nlmsg_put_extra_header(nlh, sizeof(struct inet_diag_req_v2));
-    conn_req->idiag_ext = (1 << (INET_DIAG_INFO -1));
-    conn_req->sdiag_family = AF_INET;
-    conn_req->sdiag_protocol = IPPROTO_TCP;
-
-    //Filter->out some states, to show how it is done
-    conn_req->idiag_states = 0xfff;
-
-	nl = mnl_socket_open(NETLINK_INET_DIAG);
-	if (nl == NULL) {
-		perror("mnl_socket_open");
-		exit(EXIT_FAILURE);
-	}
-
-	if (mnl_socket_bind(nl, 0, MNL_SOCKET_AUTOPID) < 0) {
-		perror("mnl_socket_bind");
-		exit(EXIT_FAILURE);
-	}
-	portid = mnl_socket_get_portid(nl);
-
-	if (mnl_socket_sendto(nl, nlh, nlh->nlmsg_len) < 0) {
-		perror("mnl_socket_sendto");
-		exit(EXIT_FAILURE);
-	}
-
-	ret = mnl_socket_recvfrom(nl, buf, sizeof(buf));
-	while (ret > 0) {
-		ret = mnl_cb_run(buf, ret, seq, portid, inet_diag_parse, (void *)links);
-		if (ret <= MNL_CB_STOP)
-			break;
-		ret = mnl_socket_recvfrom(nl, buf, sizeof(buf));
-	}
-
-	if (ret == -1) {
-		perror("error");
-		exit(EXIT_FAILURE);
-	}
-
-	mnl_socket_close(nl);
-}
 
 void links_snapshot_create(links_snapshot **links) {
     *links = (links_snapshot*)(malloc(sizeof(links_snapshot)));
     (*links)->links = 0;
     (*links)->time = 0;
-    (*links)->sockets = 0;
+    if (pthread_create(&(*links)->thread , 0, &packets_loop, *links) < 0)
+        printf("Failed to create network monitoring loop.\n");
 }
 
 void links_snapshot_delete(links_snapshot *links) {
+    /* Stop capturing packets */
+    if (links->dev) {
+        pcap_breakloop(links->dev);
+    }
+
+    pthread_join(links->thread, 0);
+
     link_snapshot *link = links->links;
     link_snapshot *tmp = link;
-    socket_stat *sock = links->sockets;
-    socket_stat *socktmp = links->sockets;
 
     while (link) {
         tmp = link->next;
@@ -426,48 +296,27 @@ void links_snapshot_delete(links_snapshot *links) {
         link = tmp;
     }
 
-    while (sock) {
-        socktmp = sock->next;
-        socket_delete(sock);
-        sock = socktmp;
-    }
-
     free(links);
-}
-
-void links_reset(links_snapshot *links) {
-    link_snapshot *link = links->links;
-
-    while (link) {
-        link->send_acc = 0;
-        link->recv_acc = 0;
-        link = link->next;
-    }
-
-    socket_stat *sock = links->sockets;
-    while (sock) {
-        sock = sock->next;
-    }
 }
 
 void links_persist(links_snapshot *links) {
     link_snapshot *link = links->links;
 
     while (link) {
+        link->time = unified_time();
         /* If link was used during the past epoch save it's statistics */
         if (link->time != 0) {
             history_append(link->recv, link->time, link->recv_acc);
             history_append(link->send, link->time, link->send_acc);
             link->time = 0;
+            link->send_acc = 0;
+            link->recv_acc = 0;
         }
         link = link->next;
     }
 }
 
 void links_snapshot_tick(links_snapshot *links) {
-    links_reset(links);
-    links_stat(links);
-    printf("----------------------------------------\n");
     links_persist(links);
 
     if (links->sync)

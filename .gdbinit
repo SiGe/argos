@@ -1,0 +1,1 @@
+handle SIGINT pass nostop

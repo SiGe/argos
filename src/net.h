@@ -1,10 +1,11 @@
 #ifndef _NET_H_
 #define _NET_H_
 
-#include <stdbool.h>
 
 #include <arpa/inet.h>
 #include <libmnl/libmnl.h>
+#include <pthread.h>
+#include <stdbool.h>
 
 #include "history.h"
 
@@ -52,7 +53,8 @@ link_snapshot {
 typedef struct
 links_snapshot {
     link_snapshot *links;
-    socket_stat *sockets;
+    struct pcap_t *dev;
+    pthread_t thread;
 
     /* For the first time, we just take snapshots of number of bytes
      * transfered/received so far */
