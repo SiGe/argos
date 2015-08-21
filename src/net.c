@@ -256,7 +256,7 @@ packets_loop(void *data) {
     {printf("Could not find a suitable network device to monitor.\n"); return 0;}
 
     links_snapshot *links = (links_snapshot *)data;
-    links->dev = pcap_open_live(devname, 64, false, -1, errbuf);
+    links->dev = pcap_open_live(devname, 64, false, 0, errbuf);
 
     printf("Trying to monitor: %s\n", devname);
     if (!links->dev)
