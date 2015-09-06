@@ -19,7 +19,7 @@ disks_snapshot *disks = 0;
 links_snapshot *links = 0;
 
 uint32_t freq = 0;
-#define MONITOR_FREQ 10
+#define MONITOR_FREQ 5
 
 void monitors_create(void) {
     cpu_snapshot_create(&cpu);
@@ -61,7 +61,7 @@ int main(int argc, char **argv) {
 
     while (true) {
         monitors_tick();
-        usleep(10000);
+        usleep(100000);
     }
 
     monitors_delete();

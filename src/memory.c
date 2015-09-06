@@ -12,17 +12,21 @@ void memory_snapshot_create(memory_snapshot **snap) {
     memory_snapshot *tmp = *snap = (memory_snapshot*)(malloc(sizeof(memory_snapshot)));
 
     history_create(&tmp->mem_available, "proc/memory/available");
+    history_create(&tmp->mem_free, "proc/memory/free");
     history_create(&tmp->cached, "proc/memory/cached");
 
     tmp->mem_available->transform = transform_identity;
+    tmp->mem_free->transform = transform_identity;
     tmp->cached->transform = transform_identity;
 }
 
 void memory_snapshot_delete(memory_snapshot *snap) {
     history_save(snap->mem_available);
+    history_save(snap->mem_free);
     history_save(snap->cached);
 
     history_delete(snap->mem_available);
+    history_delete(snap->mem_free);
     history_delete(snap->cached);
 
     free(snap);
@@ -51,6 +55,15 @@ void memory_snapshot_tick(memory_snapshot *memory) {
             t1 = strtoull(buf, 0, 10);
             
             history_append(memory->mem_available, snap->time, t1);
+        }
+
+        /* save the total number of jiffies spent in memory user+system time */
+        if (startswith(buf, "MemFree")) {
+            /* Get the free memory */
+            column(data, 1, buf, 32);
+            t1 = strtoull(buf, 0, 10);
+            
+            history_append(memory->mem_free, snap->time, t1);
         }
 
         /* save the number of context switches */

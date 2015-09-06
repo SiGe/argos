@@ -6,6 +6,7 @@
 typedef struct
 memory_snapshot {
     history *mem_available;
+    history *mem_free;
     history *cached;
 } memory_snapshot;
 
