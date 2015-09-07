@@ -3,11 +3,24 @@
 
 #include "history.h"
 
+#define MAX_CPU 64
+
+typedef struct
+cpu_history {
+    history *cpu;
+    history *sys;
+    history *user;
+    history *iowait;
+    history *idle;
+    history *steal;
+} cpu_history;
+
 typedef struct
 cpu_snapshot {
-    history *cpu;
+    cpu_history *main;
+    cpu_history *cpus[MAX_CPU];
+
     history *ctxt;
-    history *iowait;
 } cpu_snapshot;
 
 void cpu_snapshot_create(cpu_snapshot **);
